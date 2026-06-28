@@ -1,83 +1,104 @@
 import streamlit as st
 import numpy as np
 import cv2
-import onnxruntime as ort
-from streamlit_drawable_canvas import st_canvas
 
-# 1. تحميل موديل ONNX الخفيف (يتم تخزينه في الـ الكاش لسرعة الأداء)
+# دالة Softmax مخصصة للـ NumPy
+def softmax(x):
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum(axis=1, keepdims=True)
+
+# دالة ReLU
+def relu(x):
+    return np.maximum(0, x)
+
+# 1. تحميل الأوزان المخزنة
 @st.cache_resource
-def load_model():
-    # فتح جلسة تشغيل للموديل باستخدام ONNX
-    return ort.InferenceSession('handwritten_digits_cnn_model.onnx')
+def load_numpy_model():
+    data = np.load('model_weights.npz')
+    return data
 
 try:
-    ort_sess = load_model()
-except Exception as e:
-    st.error(f"⚠️ خطأ: لم يتم العثور على ملف الموديل 'handwritten_digits_cnn_model.onnx'. تأكد من رفعه في الفولدر الرئيسي على GitHub.")
+    weights = load_numpy_model()
+except:
+    st.error("⚠️ لم يتم العثور على ملف 'model_weights.npz' على السيرفر.")
     st.stop()
 
-# 2. إعداد واجهة التطبيق بشكل احترافي
+# 2. إعداد الواجهة
 st.set_page_config(page_title="Handwritten Digit Recognizer", page_icon="✏️", layout="centered")
-
 st.title("✏️ Handwritten Digit Recognition App")
-st.write("قم برسم أي رقم من **(0 إلى 9)** داخل اللوحة السوداء بالماوس أو التاتش، واضغط على الزر ليتوقع الموديل الرقم!")
+st.write("ارسم أي رقم من (0 إلى 9) في اللوحة السوداء بالماوس وشوف التوقع!")
 
 st.divider()
 
-# 3. بناء لوحة الرسم (Canvas)
-st.subheader("🖌️ لوحة الرسم الرقمية")
+from streamlit_drawable_canvas import st_canvas
 canvas_result = st_canvas(
-    fill_color="rgba(255, 255, 255, 1)",  # لون التعبئة الداخلي
-    stroke_width=16,                      # سمك القلم (مهم يكون تخين ليطابق خط داتا سيت MNIST)
-    stroke_color="#FFFFFF",                # لون القلم (أبيض)
-    background_color="#000000",            # لون الخلفية (أسود صافي)
-    height=280,                            # طول اللوحة
-    width=280,                             # عرض اللوحة
-    drawing_mode="freedraw",
-    key="canvas",
+    fill_color="rgba(255, 255, 255, 1)", stroke_width=16,
+    stroke_color="#FFFFFF", background_color="#000000",
+    height=280, width=280, drawing_mode="freedraw", key="canvas",
 )
 
-st.caption("💡 نصيحة: ارسم الرقم في منتصف اللوحة وبحجم مناسب لأفضل دقة.")
-
-# 4. معالجة الصورة الملتقطة والتنبؤ بها
-if canvas_result.image_data is not None:
-    img = canvas_result.image_data
-    
-    # التحقق من أن المستخدم قام بالرسم فعلاً (اللوحة ليست سوداء بالكامل)
-    if np.sum(img) > 0:
+if canvas_result.image_data is not None and np.sum(canvas_result.image_data) > 0:
+    if st.button("🔮 خمن الرقم المرسوم", type="primary"):
+        img = canvas_result.image_data
+        gray = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGBA2GRAY)
+        resized = cv2.resize(gray, (28, 28), interpolation=cv2.INTER_AREA)
+        normalized = resized / 255.0
         
-        # أزرار التحكم والتنبؤ
-        if st.button("🔮 خمن الرقم المرسوم الآن", type="primary"):
-            
-            # أ. تحويل الصورة المأخوذة من الـ Canvas إلى أبيض وأسود (Grayscale)
-            gray = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGBA2GRAY)
-            
-            # ب. تصغير حجم الصورة إلى 28x28 بكسل تماماً مثل صور تدريب الموديل
-            resized = cv2.resize(gray, (28, 28), interpolation=cv2.INTER_AREA)
-            
-            # ج. عمل Normalization لقيم البكسل لتصبح بين 0 و 1
-            normalized = resized / 255.0
-            
-            # د. تحويل البيانات إلى تنسيق float32 وتشكيل الأبعاد لتناسب مدخلات الـ CNN وهي (1, 28, 28, 1)
-            input_data = normalized.reshape(1, 28, 28, 1).astype(np.float32)
-            
-            # هـ. تشغيل التنبؤ عبر ONNX Session
-            input_name = ort_sess.get_inputs()[0].name
-            raw_predictions = ort_sess.run(None, {input_name: input_data})[0]
-            
-            # و. استخراج الرقم صاحب أعلى احتمالية
-            predicted_label = np.argmax(raw_predictions)
-            
-            # ز. حساب نسبة الثقة (Confidence) باستخدام Softmax يدوي لأن مخرجات ONNX تكون Raw logits
-            exp_preds = np.exp(raw_predictions - np.max(raw_predictions))
-            probabilities = exp_preds / np.sum(exp_preds)
-            confidence = np.max(probabilities) * 100
-            
-            # 5. عرض النتيجة النهائية للمستخدم بصورة مبهجة
-            st.divider()
-            st.success(f"## 🤖 الموديل يتوقع أن هذا الرقم هو: **{predicted_label}**")
-            st.metric(label="نسبة الثقة في التوقع (Confidence)", value=f"{confidence:.2f}%")
-            
-            # هيدن فولدر لمشاهدة المعالجة (للإبهار التقني في الفيديو)
-            with st.expander("👀 شاهد كيف يرى الذكاء الاصطناعي رسمتك بعد المعالجة (28x28 بكسل)"):
-                st.image(resized, width=120, caption="المعمارية الداخلية للصورة")
+        # تجهيز المدخلات (بُعد واحد للـ Batch وبُعد للقناة) -> (1, 28, 28, 1)
+        x = normalized.reshape(1, 28, 28, 1)
+        
+        # --- الحسابات الرياضية للـ CNN عبر NumPy ---
+        # 1. الطبقة الأولى Conv2D + MaxPooling
+        w0, b0 = weights['w_0'], weights['b_0']
+        # عملية الـ Convolution المبسطة
+        h_out, w_out = 26, 26
+        conv1 = np.zeros((1, h_out, w_out, 32))
+        for f in range(32):
+            for i in range(h_out):
+                for j in range(w_out):
+                    conv1[0, i, j, f] = np.sum(x[0, i:i+3, j:j+3, 0] * w0[:,:,0,f]) + b0[f]
+        conv1 = relu(conv1)
+        # MaxPooling (2x2)
+        pool1 = np.zeros((1, 13, 13, 32))
+        for f in range(32):
+            for i in range(13):
+                for j in range(13):
+                    pool1[0, i, j, f] = np.max(conv1[0, i*2:i*2+2, j*2:j*2+2, f])
+                    
+        # 2. الطبقة الثانية Conv2D + MaxPooling
+        w2, b2 = weights['w_2'], weights['b_2']
+        conv2 = np.zeros((1, 11, 11, 64))
+        for f in range(64):
+            for i in range(11):
+                for j in range(11):
+                    s = 0
+                    for c in range(32):
+                        s += np.sum(pool1[0, i:i+3, j:j+3, c] * w2[:,:,c,f])
+                    conv2[0, i, j, f] = s + b2[f]
+        conv2 = relu(conv2)
+        # MaxPooling (2x2)
+        pool2 = np.zeros((1, 5, 5, 64))
+        for f in range(64):
+            for i in range(5):
+                for j in range(5):
+                    pool2[0, i, j, f] = np.max(conv2[0, i*2:i*2+2, j*2:j*2+2, f])
+                    
+        # 3. Flatten
+        flat = pool2.flatten().reshape(1, -1)
+        
+        # 4. Dense Layer 1
+        w5, b5 = weights['w_5'], weights['b_5']
+        dense1 = relu(np.dot(flat, w5) + b5)
+        
+        # 5. Output Dense Layer
+        w6, b6 = weights['w_6'], weights['b_6']
+        raw_preds = np.dot(dense1, w6) + b6
+        probabilities = softmax(raw_preds)[0]
+        
+        # النتيجة
+        predicted_label = np.argmax(probabilities)
+        confidence = probabilities[predicted_label] * 100
+        
+        st.divider()
+        st.success(f"## 🤖 الموديل يتوقع أن هذا الرقم هو: **{predicted_label}**")
+        st.metric(label="نسبة الثقة (Confidence)", value=f"{confidence:.2f}%")
